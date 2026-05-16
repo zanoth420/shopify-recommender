@@ -51,7 +51,8 @@ async def recommend(body: RecommendRequest):
             top_tags=body.top_tags,
             purchased_ids=body.purchased_product_ids,
             shopify=shopify,
-            shop_domain=body.shop_domain
+            shop_domain=body.shop_domain,
+            query=body.query
         )
     )
 

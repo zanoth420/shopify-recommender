@@ -14,6 +14,7 @@ class RecommendRequest(BaseModel):
     top_tags: list[str]
     browse_history: list[BrowseEvent] = []
     limit: Optional[int] = 4
+    query: Optional[str] = None
 
 class Product(BaseModel):
     id: int
