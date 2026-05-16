@@ -5,13 +5,20 @@ Endpoints:
   POST /recommend  — returns ranked product recommendations
   POST /build-map  — rebuilds the collab map (run periodically)
   GET  /health     — health check
+
+Strategy:
+- When the customer's message has clear product-type intent
+  (e.g. "recommend me shoes"), tag-based recs lead.
+- Otherwise, collab recs lead (broader recommendations from
+  similar customers' purchase patterns).
+- Browse history boosts items the customer viewed recently.
 """
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from models import RecommendRequest, RecommendResponse
 from collab import get_collab_recommendations, build_collab_map
-from tags import get_tag_recommendations
+from tags import get_tag_recommendations, detect_product_type
 from browse import score_browse_intent
 from shopify import ShopifyClient
 import asyncio
@@ -29,9 +36,11 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
 
 @app.post("/recommend")
 async def recommend(body: RecommendRequest):
@@ -39,6 +48,9 @@ async def recommend(body: RecommendRequest):
         domain=body.shop_domain,
         token=body.shopify_token
     )
+
+    # Detect if customer's message has clear intent (e.g. "shoes")
+    query_type = detect_product_type(body.query) if body.query else None
 
     collab_recs, tag_recs = await asyncio.gather(
         get_collab_recommendations(
@@ -56,10 +68,20 @@ async def recommend(body: RecommendRequest):
         )
     )
 
+    # When query intent is detected, filter collab to only matching products
+    # and put tags first in the ranking
+    if query_type:
+        collab_recs = [r for r in collab_recs if _matches_type(r, query_type)]
+
     browse_boost = score_browse_intent(body.browse_history)
-    merged = merge_recommendations(collab_recs, tag_recs, browse_boost, limit=body.limit or 4)
+    merged = merge_recommendations(
+        collab_recs, tag_recs, browse_boost,
+        query_type=query_type,
+        limit=body.limit or 4
+    )
 
     return RecommendResponse(recommendations=merged)
+
 
 @app.post("/build-map")
 async def build_map(shop_domain: str, shopify_token: str, admin_key: str):
@@ -69,11 +91,24 @@ async def build_map(shop_domain: str, shopify_token: str, admin_key: str):
     result = await build_collab_map(shop_domain=shop_domain, shopify=shopify)
     return {"success": True, **result}
 
-def merge_recommendations(collab, tags, browse_boost, limit=4):
+
+def _matches_type(rec, query_type):
+    """Check if a recommendation belongs to the requested product type."""
+    # Collab recs include product_type when fetched from Shopify
+    pt = (rec.get("product_type") or "").lower()
+    return query_type.lower() in pt
+
+
+def merge_recommendations(collab, tags, browse_boost, query_type=None, limit=4):
     seen = set()
     merged = []
 
-    all_recs = collab + tags
+    # When customer has specific intent, tags lead; otherwise collab leads
+    if query_type:
+        all_recs = tags + collab
+    else:
+        all_recs = collab + tags
+
     for rec in all_recs:
         boost = browse_boost.get(rec["title"], 0)
         rec["score"] = rec.get("score", 0) + (boost * 0.5)

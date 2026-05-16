@@ -146,6 +146,7 @@ async def _fetch_product_details(
             "url": f"https://{shop_domain}/products/{p['handle']}",
             "image": (p.get("images") or [{}])[0].get("src"),
             "price": (p.get("variants") or [{}])[0].get("price"),
+            "product_type": p.get("product_type", ""),
             "source": source,
             "score": 0.0
         }

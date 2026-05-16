@@ -96,6 +96,7 @@ async def get_tag_recommendations(
             "url": f"https://{shop_domain}/products/{p['handle']}",
             "image": (p.get("images") or [{}])[0].get("src"),
             "price": (p.get("variants") or [{}])[0].get("price"),
+            "product_type": product_type,
             "source": "tags",
             "score": score
         })

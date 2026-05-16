@@ -41,7 +41,7 @@ class ShopifyClient:
             return []
         res = await self.get(
             f"products.json?ids={','.join(str(i) for i in ids)}"
-            f"&fields=id,title,handle,images,variants"
+            f"&fields=id,title,handle,images,variants,product_type"
         )
         return res.get("products", [])
 
@@ -49,6 +49,6 @@ class ShopifyClient:
         from urllib.parse import quote
         res = await self.get(
             f"products.json?product_type={quote(product_type)}&limit={limit}"
-            f"&fields=id,title,handle,images,variants,tags"
+            f"&fields=id,title,handle,images,variants,tags,product_type"
         )
         return res.get("products", [])
