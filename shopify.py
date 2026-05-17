@@ -1,12 +1,27 @@
 """
-shopify.py — Async Shopify Admin API client
+shopify.py — Async Shopify Admin API client with retry logic
 """
 
 import httpx
 import re
+import asyncio
 
-# Force IPv4 to avoid async DNS issues on Windows
-_transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+# Force IPv4 to avoid async DNS issues
+_transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=2)
+
+
+async def _get_with_retry(client, url, headers, max_retries=3):
+    """Wrapper that retries on ReadError/ConnectError/timeout."""
+    for attempt in range(max_retries):
+        try:
+            res = await client.get(url, headers=headers)
+            res.raise_for_status()
+            return res
+        except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as e:
+            if attempt == max_retries - 1:
+                raise
+            await asyncio.sleep(0.5 * (attempt + 1))  # 0.5s, 1s, 1.5s
+    return None
 
 
 class ShopifyClient:
@@ -19,8 +34,7 @@ class ShopifyClient:
 
     async def get(self, path: str) -> dict:
         async with httpx.AsyncClient(timeout=30.0, transport=_transport) as client:
-            res = await client.get(f"{self.base}/{path}", headers=self.headers)
-            res.raise_for_status()
+            res = await _get_with_retry(client, f"{self.base}/{path}", self.headers)
             return res.json()
 
     async def get_all_orders(self) -> list:
@@ -28,7 +42,7 @@ class ShopifyClient:
         url = f"{self.base}/orders.json?status=any&limit=250&fields=id,customer,line_items"
         async with httpx.AsyncClient(timeout=30.0, transport=_transport) as client:
             while url:
-                res = await client.get(url, headers=self.headers)
+                res = await _get_with_retry(client, url, self.headers)
                 data = res.json()
                 all_orders.extend(data.get("orders", []))
                 link = res.headers.get("Link", "")
