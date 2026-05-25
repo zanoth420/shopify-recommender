@@ -6,6 +6,7 @@ Endpoints:
   POST /recommend/debug  — same + full scoring breakdown
   POST /build-map        — rebuilds the collab map
   GET  /health           — health check
+  GET  /debug/cache      — inspect cached collab/SVD data
 
 All endpoints except /health require INTERNAL_API_KEY auth.
 """
@@ -51,13 +52,14 @@ def verify_internal_key(request: Request):
 async def health():
     return {"status": "ok"}
 
+
 @app.get("/debug/cache")
 async def debug_cache(shop_domain: str, request: Request):
     verify_internal_key(request)
-    
+
     svd_data = cache.get(f"svd:{shop_domain}")
     collab_data = cache.get(f"collab:{shop_domain}")
-    
+
     return {
         "svd_exists": svd_data is not None,
         "svd_product_count": len(svd_data["product_list"]) if svd_data else 0,
@@ -66,6 +68,7 @@ async def debug_cache(shop_domain: str, request: Request):
         "collab_product_count": len(collab_data) if collab_data else 0,
         "collab_sample_ids": list(collab_data.keys())[:10] if collab_data else [],
     }
+
 
 async def _get_recommendations(body: RecommendRequest):
     """
@@ -92,8 +95,12 @@ async def _get_recommendations(body: RecommendRequest):
         ),
     )
 
+    # Deprioritize collab results that don't match query type
+    # instead of removing them entirely
     if query_type:
-        collab_recs = [r for r in collab_recs if _matches_type(r, query_type)]
+        for rec in collab_recs:
+            if not _matches_type(rec, query_type):
+                rec["score"] = rec.get("score", 0) * 0.3
 
     browse_boost = score_browse_intent(body.browse_history)
     merged = merge_recommendations(
