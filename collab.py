@@ -14,6 +14,7 @@ import cache
 
 COLLAB_TTL = 6 * 3600  # 6 hours
 
+
 async def build_collab_map(shop_domain: str, shopify):
     all_orders = await shopify.get_all_orders()
 
@@ -84,14 +85,15 @@ async def get_collab_recommendations(
     # Try SVD first
     svd_data = cache.get(f"svd:{shop_domain}")
     if svd_data:
-        recs = _svd_recommend(svd_data, purchased, limit)
-        if recs:
-            return await _fetch_product_details(recs, purchased, shopify, shop_domain, "svd")
+        scored = _svd_recommend(svd_data, purchased, limit)
+        if scored:
+            return await _fetch_product_details(
+                scored, purchased, shopify, shop_domain, "svd"
+            )
 
     # Fall back to co-occurrence
     product_map = cache.get(f"collab:{shop_domain}")
     if not product_map:
-        # No cache yet — build it now
         await build_collab_map(shop_domain, shopify)
         product_map = cache.get(f"collab:{shop_domain}")
 
@@ -105,11 +107,16 @@ async def get_collab_recommendations(
             if related_id not in purchased:
                 scores[related_id] += count
 
-    top_ids = sorted(scores, key=scores.get, reverse=True)[:limit]
-    return await _fetch_product_details(top_ids, purchased, shopify, shop_domain, "collab")
+    top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:limit]
+    scored = {pid: score for pid, score in top}
+
+    return await _fetch_product_details(
+        scored, purchased, shopify, shop_domain, "collab"
+    )
 
 
-def _svd_recommend(svd_data: dict, purchased: set, limit: int) -> list:
+def _svd_recommend(svd_data: dict, purchased: set, limit: int) -> dict | None:
+    """Returns {product_id: score} or None if no data."""
     product_list = svd_data["product_list"]
     product_factors = np.array(svd_data["product_factors"])
 
@@ -117,28 +124,39 @@ def _svd_recommend(svd_data: dict, purchased: set, limit: int) -> list:
         i for i, p in enumerate(product_list) if p in purchased
     ]
     if not purchased_indices:
-        return []
+        return None
 
     user_vector = np.mean(product_factors[purchased_indices], axis=0)
-    scores = product_factors @ user_vector
+    raw_scores = product_factors @ user_vector
 
     for idx in purchased_indices:
-        scores[idx] = -999
+        raw_scores[idx] = -999
 
-    top_indices = np.argsort(scores)[::-1][:limit]
-    return [product_list[i] for i in top_indices]
+    top_indices = np.argsort(raw_scores)[::-1][:limit]
+    return {
+        product_list[i]: float(raw_scores[i])
+        for i in top_indices
+        if raw_scores[i] > -999
+    }
 
 
 async def _fetch_product_details(
-    product_ids: list,
+    scored: dict,
     purchased: set,
     shopify,
     shop_domain: str,
     source: str
 ) -> list:
-    if not product_ids:
+    """
+    scored: {product_id: score}
+    Fetches full product details and attaches the actual score.
+    """
+    if not scored:
         return []
+
+    product_ids = list(scored.keys())
     products = await shopify.get_products_by_ids(product_ids)
+
     return [
         {
             "id": p["id"],
@@ -148,7 +166,7 @@ async def _fetch_product_details(
             "price": (p.get("variants") or [{}])[0].get("price"),
             "product_type": p.get("product_type", ""),
             "source": source,
-            "score": 0.0
+            "score": scored.get(str(p["id"]), 0.0),
         }
         for p in products
         if str(p["id"]) not in purchased

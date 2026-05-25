@@ -107,13 +107,19 @@ def merge_recommendations(collab, tags, browse_boost, query_type=None, limit=4):
     else:
         all_recs = collab + tags
 
+    # Build new list with boosted scores — don't mutate originals
+    boosted = []
     for rec in all_recs:
         boost = browse_boost.get(rec["title"], 0)
-        rec["score"] = rec.get("score", 0) + (boost * 0.5)
+        boosted.append({
+            **rec,
+            "score": rec.get("score", 0) + (boost * 0.5),
+            "browse_boost": boost,
+        })
 
-    all_recs.sort(key=lambda x: x.get("score", 0), reverse=True)
+    boosted.sort(key=lambda x: x["score"], reverse=True)
 
-    for rec in all_recs:
+    for rec in boosted:
         rid = str(rec["id"])
         if rid not in seen:
             seen.add(rid)
