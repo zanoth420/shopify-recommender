@@ -50,6 +50,21 @@ def verify_internal_key(request: Request):
 async def health():
     return {"status": "ok"}
 
+@app.get("/debug/cache/{shop_domain}")
+async def debug_cache(shop_domain: str, request: Request):
+    verify_internal_key(request)
+    
+    svd_data = cache.get(f"svd:{shop_domain}")
+    collab_data = cache.get(f"collab:{shop_domain}")
+    
+    return {
+        "svd_exists": svd_data is not None,
+        "svd_product_count": len(svd_data["product_list"]) if svd_data else 0,
+        "svd_sample_ids": svd_data["product_list"][:10] if svd_data else [],
+        "collab_exists": collab_data is not None,
+        "collab_product_count": len(collab_data) if collab_data else 0,
+        "collab_sample_ids": list(collab_data.keys())[:10] if collab_data else [],
+    }
 
 async def _get_recommendations(body: RecommendRequest):
     """
