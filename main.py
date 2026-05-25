@@ -22,6 +22,7 @@ from browse import score_browse_intent
 from shopify import ShopifyClient
 import asyncio
 import os
+import cache
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -50,7 +51,7 @@ def verify_internal_key(request: Request):
 async def health():
     return {"status": "ok"}
 
-@app.get("/debug/cache/{shop_domain}")
+@app.get("/debug/cache")
 async def debug_cache(shop_domain: str, request: Request):
     verify_internal_key(request)
     
