@@ -7,12 +7,14 @@ Endpoints:
   POST /build-map        — rebuilds the collab map
   GET  /health           — health check
   GET  /debug/cache      — inspect cached collab/SVD data
-  GET  /logs             — view recent recommendation logs
+  GET  /logs             — view recent recommendation logs (JSON)
+  GET  /logs/view        — visual dashboard for recommendation logs
 
 All endpoints except /health require INTERNAL_API_KEY auth.
 """
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from models import (
     RecommendRequest, RecommendResponse,
@@ -23,6 +25,7 @@ from tags import get_tag_recommendations, detect_product_type
 from browse import score_browse_intent
 from shopify import ShopifyClient
 from db import log_recommendation, get_recent_logs
+from logs_html import LOGS_PAGE
 import asyncio
 import os
 import cache
@@ -47,6 +50,11 @@ def verify_internal_key(request: Request):
     auth = request.headers.get("Authorization", "")
     token = auth.replace("Bearer ", "").strip()
     if not INTERNAL_API_KEY or token != INTERNAL_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def verify_key_param(key: str):
+    if not INTERNAL_API_KEY or key != INTERNAL_API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -79,6 +87,12 @@ async def view_logs(request: Request, shop_domain: str = None, limit: int = 20):
     return {"logs": logs, "count": len(logs)}
 
 
+@app.get("/logs/view", response_class=HTMLResponse)
+async def logs_dashboard(key: str = Query(...)):
+    verify_key_param(key)
+    return HTMLResponse(content=LOGS_PAGE)
+
+
 async def _get_recommendations(body: RecommendRequest):
     """
     Core recommendation logic. Returns (merged, collab_recs, tag_recs, browse_boost, query_type).
@@ -104,8 +118,6 @@ async def _get_recommendations(body: RecommendRequest):
         ),
     )
 
-    # Deprioritize collab results that don't match query type
-    # instead of removing them entirely
     if query_type:
         for rec in collab_recs:
             if not _matches_type(rec, query_type):
@@ -122,7 +134,6 @@ async def _get_recommendations(body: RecommendRequest):
 
 
 def _log(body, merged, collab_recs, tag_recs, browse_boost, query_type, debug_info=None):
-    """Log recommendation to SQLite. Non-blocking — errors are swallowed."""
     try:
         log_recommendation(
             shop_domain=body.shop_domain,
@@ -137,7 +148,7 @@ def _log(body, merged, collab_recs, tag_recs, browse_boost, query_type, debug_in
             debug_info=debug_info,
         )
     except Exception:
-        pass  # logging should never break recommendations
+        pass
 
 
 @app.post("/recommend")
