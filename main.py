@@ -2,16 +2,20 @@
 main.py — FastAPI recommendation service
 
 Endpoints:
-  POST /recommend  — returns ranked product recommendations
-  POST /build-map  — rebuilds the collab map
-  GET  /health     — health check
+  POST /recommend        — returns ranked product recommendations
+  POST /recommend/debug  — same + full scoring breakdown
+  POST /build-map        — rebuilds the collab map
+  GET  /health           — health check
 
 All endpoints except /health require INTERNAL_API_KEY auth.
 """
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from models import RecommendRequest, RecommendResponse
+from models import (
+    RecommendRequest, RecommendResponse,
+    DebugRecommendResponse, DebugInfo, ScoringBreakdown,
+)
 from collab import get_collab_recommendations, build_collab_map
 from tags import get_tag_recommendations, detect_product_type
 from browse import score_browse_intent
@@ -36,7 +40,6 @@ app.add_middleware(
 
 
 def verify_internal_key(request: Request):
-    """Verify the request came from our Worker."""
     auth = request.headers.get("Authorization", "")
     token = auth.replace("Bearer ", "").strip()
     if not INTERNAL_API_KEY or token != INTERNAL_API_KEY:
@@ -48,10 +51,11 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/recommend")
-async def recommend(body: RecommendRequest, request: Request):
-    verify_internal_key(request)
-
+async def _get_recommendations(body: RecommendRequest):
+    """
+    Core recommendation logic. Returns (merged, collab_recs, tag_recs, browse_boost, query_type).
+    Used by both /recommend and /recommend/debug.
+    """
     shopify = ShopifyClient(domain=body.shop_domain)
 
     query_type = detect_product_type(body.query) if body.query else None
@@ -82,7 +86,57 @@ async def recommend(body: RecommendRequest, request: Request):
         limit=body.limit or 4,
     )
 
+    return merged, collab_recs, tag_recs, browse_boost, query_type
+
+
+@app.post("/recommend")
+async def recommend(body: RecommendRequest, request: Request):
+    verify_internal_key(request)
+    merged, _, _, _, _ = await _get_recommendations(body)
     return RecommendResponse(recommendations=merged)
+
+
+@app.post("/recommend/debug")
+async def recommend_debug(body: RecommendRequest, request: Request):
+    verify_internal_key(request)
+    merged, collab_recs, tag_recs, browse_boost, query_type = await _get_recommendations(body)
+
+    merge_order = "tags_first" if query_type else "collab_first"
+
+    collab_breakdowns = [
+        ScoringBreakdown(
+            id=r["id"],
+            title=r["title"],
+            source=r.get("source", "collab"),
+            raw_score=r.get("score", 0),
+            browse_boost=browse_boost.get(r["title"], 0),
+            final_score=r.get("score", 0) + browse_boost.get(r["title"], 0) * 0.5,
+        )
+        for r in collab_recs
+    ]
+
+    tag_breakdowns = [
+        ScoringBreakdown(
+            id=r["id"],
+            title=r["title"],
+            source="tags",
+            raw_score=r.get("score", 0),
+            browse_boost=browse_boost.get(r["title"], 0),
+            final_score=r.get("score", 0) + browse_boost.get(r["title"], 0) * 0.5,
+        )
+        for r in tag_recs
+    ]
+
+    debug = DebugInfo(
+        query_type_detected=query_type,
+        merge_order=merge_order,
+        collab_candidates=collab_breakdowns,
+        tag_candidates=tag_breakdowns,
+        browse_boost_map=browse_boost,
+        final_picks=[r["id"] for r in merged],
+    )
+
+    return DebugRecommendResponse(recommendations=merged, debug=debug)
 
 
 @app.post("/build-map")
@@ -107,7 +161,6 @@ def merge_recommendations(collab, tags, browse_boost, query_type=None, limit=4):
     else:
         all_recs = collab + tags
 
-    # Build new list with boosted scores — don't mutate originals
     boosted = []
     for rec in all_recs:
         boost = browse_boost.get(rec["title"], 0)
