@@ -7,6 +7,7 @@ Endpoints:
   POST /build-map        — rebuilds the collab map
   GET  /health           — health check
   GET  /debug/cache      — inspect cached collab/SVD data
+  GET  /logs             — view recent recommendation logs
 
 All endpoints except /health require INTERNAL_API_KEY auth.
 """
@@ -21,6 +22,7 @@ from collab import get_collab_recommendations, build_collab_map
 from tags import get_tag_recommendations, detect_product_type
 from browse import score_browse_intent
 from shopify import ShopifyClient
+from db import log_recommendation, get_recent_logs
 import asyncio
 import os
 import cache
@@ -70,6 +72,13 @@ async def debug_cache(shop_domain: str, request: Request):
     }
 
 
+@app.get("/logs")
+async def view_logs(request: Request, shop_domain: str = None, limit: int = 20):
+    verify_internal_key(request)
+    logs = get_recent_logs(shop_domain=shop_domain, limit=limit)
+    return {"logs": logs, "count": len(logs)}
+
+
 async def _get_recommendations(body: RecommendRequest):
     """
     Core recommendation logic. Returns (merged, collab_recs, tag_recs, browse_boost, query_type).
@@ -112,10 +121,32 @@ async def _get_recommendations(body: RecommendRequest):
     return merged, collab_recs, tag_recs, browse_boost, query_type
 
 
+def _log(body, merged, collab_recs, tag_recs, browse_boost, query_type, debug_info=None):
+    """Log recommendation to SQLite. Non-blocking — errors are swallowed."""
+    try:
+        log_recommendation(
+            shop_domain=body.shop_domain,
+            query=body.query,
+            query_type=query_type,
+            merge_order="tags_first" if query_type else "collab_first",
+            purchased_ids=body.purchased_product_ids,
+            collab_recs=collab_recs,
+            tag_recs=tag_recs,
+            browse_boost=browse_boost,
+            merged=merged,
+            debug_info=debug_info,
+        )
+    except Exception:
+        pass  # logging should never break recommendations
+
+
 @app.post("/recommend")
 async def recommend(body: RecommendRequest, request: Request):
     verify_internal_key(request)
-    merged, _, _, _, _ = await _get_recommendations(body)
+    merged, collab_recs, tag_recs, browse_boost, query_type = await _get_recommendations(body)
+
+    _log(body, merged, collab_recs, tag_recs, browse_boost, query_type)
+
     return RecommendResponse(recommendations=merged)
 
 
@@ -150,6 +181,15 @@ async def recommend_debug(body: RecommendRequest, request: Request):
         for r in tag_recs
     ]
 
+    debug_dict = {
+        "query_type_detected": query_type,
+        "merge_order": merge_order,
+        "collab_candidates": [b.model_dump() for b in collab_breakdowns],
+        "tag_candidates": [b.model_dump() for b in tag_breakdowns],
+        "browse_boost_map": browse_boost,
+        "final_picks": [r["id"] for r in merged],
+    }
+
     debug = DebugInfo(
         query_type_detected=query_type,
         merge_order=merge_order,
@@ -158,6 +198,8 @@ async def recommend_debug(body: RecommendRequest, request: Request):
         browse_boost_map=browse_boost,
         final_picks=[r["id"] for r in merged],
     )
+
+    _log(body, merged, collab_recs, tag_recs, browse_boost, query_type, debug_info=debug_dict)
 
     return DebugRecommendResponse(recommendations=merged, debug=debug)
 
