@@ -3,18 +3,13 @@ main.py — FastAPI recommendation service
 
 Endpoints:
   POST /recommend  — returns ranked product recommendations
-  POST /build-map  — rebuilds the collab map (run periodically)
+  POST /build-map  — rebuilds the collab map
   GET  /health     — health check
 
-Strategy:
-- When the customer's message has clear product-type intent
-  (e.g. "recommend me shoes"), tag-based recs lead.
-- Otherwise, collab recs lead (broader recommendations from
-  similar customers' purchase patterns).
-- Browse history boosts items the customer viewed recently.
+All endpoints except /health require INTERNAL_API_KEY auth.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from models import RecommendRequest, RecommendResponse
 from collab import get_collab_recommendations, build_collab_map
@@ -27,14 +22,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
+WORKER_URL = os.getenv("WORKER_URL", "")
+
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"]
+    allow_origins=[WORKER_URL] if WORKER_URL else ["*"],
+    allow_methods=["POST", "GET"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+
+def verify_internal_key(request: Request):
+    """Verify the request came from our Worker."""
+    auth = request.headers.get("Authorization", "")
+    token = auth.replace("Bearer ", "").strip()
+    if not INTERNAL_API_KEY or token != INTERNAL_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @app.get("/health")
@@ -43,20 +49,18 @@ async def health():
 
 
 @app.post("/recommend")
-async def recommend(body: RecommendRequest):
-    shopify = ShopifyClient(
-        domain=body.shop_domain,
-        token=body.shopify_token
-    )
+async def recommend(body: RecommendRequest, request: Request):
+    verify_internal_key(request)
 
-    # Detect if customer's message has clear intent (e.g. "shoes")
+    shopify = ShopifyClient(domain=body.shop_domain)
+
     query_type = detect_product_type(body.query) if body.query else None
 
     collab_recs, tag_recs = await asyncio.gather(
         get_collab_recommendations(
             shop_domain=body.shop_domain,
             purchased_ids=body.purchased_product_ids,
-            shopify=shopify
+            shopify=shopify,
         ),
         get_tag_recommendations(
             top_product_types=body.top_product_types,
@@ -64,12 +68,10 @@ async def recommend(body: RecommendRequest):
             purchased_ids=body.purchased_product_ids,
             shopify=shopify,
             shop_domain=body.shop_domain,
-            query=body.query
-        )
+            query=body.query,
+        ),
     )
 
-    # When query intent is detected, filter collab to only matching products
-    # and put tags first in the ranking
     if query_type:
         collab_recs = [r for r in collab_recs if _matches_type(r, query_type)]
 
@@ -77,24 +79,21 @@ async def recommend(body: RecommendRequest):
     merged = merge_recommendations(
         collab_recs, tag_recs, browse_boost,
         query_type=query_type,
-        limit=body.limit or 4
+        limit=body.limit or 4,
     )
 
     return RecommendResponse(recommendations=merged)
 
 
 @app.post("/build-map")
-async def build_map(shop_domain: str, shopify_token: str, admin_key: str):
-    if admin_key != os.getenv("ADMIN_KEY"):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    shopify = ShopifyClient(domain=shop_domain, token=shopify_token)
+async def build_map(shop_domain: str, request: Request):
+    verify_internal_key(request)
+    shopify = ShopifyClient(domain=shop_domain)
     result = await build_collab_map(shop_domain=shop_domain, shopify=shopify)
     return {"success": True, **result}
 
 
 def _matches_type(rec, query_type):
-    """Check if a recommendation belongs to the requested product type."""
-    # Collab recs include product_type when fetched from Shopify
     pt = (rec.get("product_type") or "").lower()
     return query_type.lower() in pt
 
@@ -103,7 +102,6 @@ def merge_recommendations(collab, tags, browse_boost, query_type=None, limit=4):
     seen = set()
     merged = []
 
-    # When customer has specific intent, tags lead; otherwise collab leads
     if query_type:
         all_recs = tags + collab
     else:

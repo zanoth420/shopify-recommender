@@ -1,54 +1,67 @@
 """
-shopify.py — Async Shopify Admin API client with retry logic
+shopify.py — Shopify data client via Worker proxy
+
+Instead of calling Shopify Admin API directly (which requires
+the store's token), this client calls the Worker's /internal/products
+endpoint. The Worker holds Shopify tokens in KV and proxies requests.
+
+Env vars:
+  WORKER_URL       — e.g. https://shopify-bot.helm-trial.workers.dev
+  INTERNAL_API_KEY — shared secret matching the Worker's secret
 """
 
 import httpx
-import re
 import asyncio
+import os
 
-# Force IPv4 to avoid async DNS issues
+WORKER_URL = os.getenv("WORKER_URL", "")
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
+
 _transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=2)
 
 
-async def _get_with_retry(client, url, headers, max_retries=3):
-    """Wrapper that retries on ReadError/ConnectError/timeout."""
+async def _post_with_retry(client, url, headers, json_body, max_retries=3):
     for attempt in range(max_retries):
         try:
-            res = await client.get(url, headers=headers)
+            res = await client.post(url, headers=headers, json=json_body)
             res.raise_for_status()
             return res
-        except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as e:
+        except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException):
             if attempt == max_retries - 1:
                 raise
-            await asyncio.sleep(0.5 * (attempt + 1))  # 0.5s, 1s, 1.5s
+            await asyncio.sleep(0.5 * (attempt + 1))
     return None
 
 
 class ShopifyClient:
-    def __init__(self, domain: str, token: str, api_version: str = "2026-04"):
-        self.base = f"https://{domain}/admin/api/{api_version}"
+    """Fetches Shopify data through the Worker's /internal/products proxy."""
+
+    def __init__(self, domain: str):
+        self.domain = domain
+        self.proxy_url = f"{WORKER_URL}/internal/products"
         self.headers = {
-            "X-Shopify-Access-Token": token,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {INTERNAL_API_KEY}",
         }
 
     async def get(self, path: str) -> dict:
         async with httpx.AsyncClient(timeout=30.0, transport=_transport) as client:
-            res = await _get_with_retry(client, f"{self.base}/{path}", self.headers)
+            res = await _post_with_retry(
+                client, self.proxy_url, self.headers,
+                {"shop_domain": self.domain, "path": path}
+            )
             return res.json()
 
     async def get_all_orders(self) -> list:
-        all_orders = []
-        url = f"{self.base}/orders.json?status=any&limit=250&fields=id,customer,line_items"
-        async with httpx.AsyncClient(timeout=30.0, transport=_transport) as client:
-            while url:
-                res = await _get_with_retry(client, url, self.headers)
-                data = res.json()
-                all_orders.extend(data.get("orders", []))
-                link = res.headers.get("Link", "")
-                next_match = re.search(r'<([^>]+)>;\s*rel="next"', link)
-                url = next_match.group(1) if next_match else None
-        return all_orders
+        """Fetch first page of orders via proxy."""
+        try:
+            data = await self.get(
+                "orders.json?status=any&limit=250&fields=id,customer,line_items"
+            )
+            return data.get("orders", [])
+        except Exception as e:
+            print(f"[shopify] get_all_orders failed: {e}")
+            return []
 
     async def get_products_by_ids(self, ids: list) -> list:
         if not ids:
