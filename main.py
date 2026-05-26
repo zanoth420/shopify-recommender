@@ -78,6 +78,40 @@ async def debug_cache(shop_domain: str, request: Request):
         "collab_sample_ids": list(collab_data.keys())[:10] if collab_data else [],
     }
 
+@app.get("/debug/map")
+async def debug_map(shop_domain: str, request: Request):
+    verify_internal_key(request)
+
+    svd_data = cache.get(f"svd:{shop_domain}")
+    collab_data = cache.get(f"collab:{shop_domain}")
+
+    result = {
+        "shop_domain": shop_domain,
+        "svd": None,
+        "collab": None,
+    }
+
+    if svd_data:
+        import numpy as np
+        product_list = svd_data["product_list"]
+        product_factors = np.array(svd_data["product_factors"])
+
+        result["svd"] = {
+            "product_count": len(product_list),
+            "customer_count": len(svd_data["customer_list"]),
+            "n_components": product_factors.shape[1] if len(product_factors.shape) > 1 else 0,
+            "products": product_list,
+            "customers": svd_data["customer_list"],
+        }
+
+    if collab_data:
+        result["collab"] = {
+            "product_count": len(collab_data),
+            "co_occurrences": collab_data,
+        }
+
+    return result
+
 
 @app.get("/logs")
 async def view_logs(request: Request, shop_domain: str = None, limit: int = 20):
