@@ -57,7 +57,7 @@ async def build_collab_map(shop_domain: str, shopify):
             customer_factors = svd.fit_transform(matrix)
             product_factors = svd.components_.T
 
-            cache.set(f"svd:{shop_domain}", {
+            await cache.set(f"svd:{shop_domain}", {
                 "customer_factors": customer_factors.tolist(),
                 "product_factors": product_factors.tolist(),
                 "product_list": product_list,
@@ -65,7 +65,7 @@ async def build_collab_map(shop_domain: str, shopify):
             }, ttl_seconds=COLLAB_TTL)
 
     # Store co-occurrence map
-    cache.set(
+    await cache.set(
         f"collab:{shop_domain}",
         {k: dict(v) for k, v in product_map.items()},
         ttl_seconds=COLLAB_TTL
@@ -83,7 +83,7 @@ async def get_collab_recommendations(
     purchased = set(str(p) for p in purchased_ids)
 
     # Try SVD first
-    svd_data = cache.get(f"svd:{shop_domain}")
+    svd_data = await cache.get(f"svd:{shop_domain}")
     if svd_data:
         scored = _svd_recommend(svd_data, purchased, limit)
         if scored:
@@ -92,10 +92,10 @@ async def get_collab_recommendations(
             )
 
     # Fall back to co-occurrence
-    product_map = cache.get(f"collab:{shop_domain}")
+    product_map = await cache.get(f"collab:{shop_domain}")
     if not product_map:
         await build_collab_map(shop_domain, shopify)
-        product_map = cache.get(f"collab:{shop_domain}")
+        product_map = await cache.get(f"collab:{shop_domain}")
 
     if not product_map:
         return []

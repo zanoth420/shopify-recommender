@@ -26,6 +26,7 @@ from browse import score_browse_intent
 from shopify import ShopifyClient
 from db import log_recommendation, get_recent_logs
 import asyncio
+import json
 import os
 import cache
 from dotenv import load_dotenv
@@ -66,8 +67,8 @@ async def health():
 async def debug_cache(shop_domain: str, request: Request):
     verify_internal_key(request)
 
-    svd_data = cache.get(f"svd:{shop_domain}")
-    collab_data = cache.get(f"collab:{shop_domain}")
+    svd_data = await cache.get(f"svd:{shop_domain}")
+    collab_data = await cache.get(f"collab:{shop_domain}")
 
     return {
         "svd_exists": svd_data is not None,
@@ -82,8 +83,8 @@ async def debug_cache(shop_domain: str, request: Request):
 async def debug_map(shop_domain: str, request: Request):
     verify_internal_key(request)
 
-    svd_data = cache.get(f"svd:{shop_domain}")
-    collab_data = cache.get(f"collab:{shop_domain}")
+    svd_data = await cache.get(f"svd:{shop_domain}")
+    collab_data = await cache.get(f"collab:{shop_domain}")
 
     result = {
         "shop_domain": shop_domain,
@@ -124,7 +125,6 @@ async def view_logs(request: Request, shop_domain: str = None, limit: int = 20):
 async def logs_dashboard(key: str = Query(...)):
     verify_key_param(key)
     logs = get_recent_logs(limit=50)
-    import json
     logs_json = json.dumps(logs)
     html = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Helm Logs</title>

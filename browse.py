@@ -8,6 +8,7 @@ get a higher intent score.
 from datetime import datetime, timezone
 from collections import defaultdict
 import math
+import re
 
 def score_browse_intent(browse_history: list) -> dict:
     """
@@ -28,8 +29,6 @@ def score_browse_intent(browse_history: list) -> dict:
         if not title:
             continue
 
-        # Clean store name suffix
-        import re
         title = re.sub(r'\s*[–-]\s*.*$', '', title).strip()
 
         # Recency weight — exponential decay
@@ -40,8 +39,8 @@ def score_browse_intent(browse_history: list) -> dict:
             )
             hours_ago = (now - viewed_at).total_seconds() / 3600
             recency_weight = math.exp(-0.1 * hours_ago)  # decay factor
-        except:
-            recency_weight = 0.5  # default if timestamp missing
+        except (ValueError, AttributeError):
+            recency_weight = 0.5
 
         scores[title] += recency_weight
 
