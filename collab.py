@@ -6,11 +6,14 @@ factorizes it with SVD, and uses the latent factors
 to find products similar customers bought.
 """
 
+import logging
 import numpy as np
 from sklearn.decomposition import TruncatedSVD
 from collections import defaultdict
 from itertools import permutations
 import cache
+
+logger = logging.getLogger(__name__)
 
 COLLAB_TTL = 6 * 3600  # 6 hours
 
@@ -94,10 +97,8 @@ async def get_collab_recommendations(
     # Fall back to co-occurrence
     product_map = await cache.get(f"collab:{shop_domain}")
     if not product_map:
-        await build_collab_map(shop_domain, shopify)
-        product_map = await cache.get(f"collab:{shop_domain}")
-
-    if not product_map:
+        # Cold cache: degrade to tag-only. Never rebuild inline — it blocks/times out.
+        logger.warning("Collab cache cold for %s — returning no collab recs.", shop_domain)
         return []
 
     scores = defaultdict(float)

@@ -25,18 +25,54 @@ from tags import get_tag_recommendations, detect_product_type
 from browse import score_browse_intent
 from shopify import ShopifyClient
 from db import log_recommendation, get_recent_logs
+from contextlib import asynccontextmanager
 import asyncio
 import json
+import logging
 import os
 import cache
 from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
 WORKER_URL = os.getenv("WORKER_URL", "")
 
-app = FastAPI()
+# Persistent registry of shops to re-warm on startup. No TTL — must outlive
+# the collab map's 6h TTL and survive restarts (Redis only).
+REGISTERED_STORES_KEY = "registered_stores"
+
+
+async def _register_store(shop_domain: str):
+    domains = await cache.get(REGISTERED_STORES_KEY) or []
+    if shop_domain not in domains:
+        domains.append(shop_domain)
+        await cache.set(REGISTERED_STORES_KEY, domains, ttl_seconds=None)
+
+
+async def _warm_collab_maps():
+    domains = await cache.get(REGISTERED_STORES_KEY) or []
+    logger.info("Startup: warming collab maps for %d store(s).", len(domains))
+    for domain in domains:
+        try:
+            shopify = ShopifyClient(domain=domain)
+            await build_collab_map(shop_domain=domain, shopify=shopify)
+            logger.info("Startup: warmed collab map for %s.", domain)
+        except Exception:
+            logger.exception("Startup: collab warm failed for %s", domain)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Warm the collab cache for known stores before requests arrive, so
+    # /recommend never has to rebuild inline.
+    asyncio.create_task(_warm_collab_maps())
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,7 +96,10 @@ def verify_key_param(key: str):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok",
+            "cache_backend": cache.backend_name(),
+            "cache_reachable": await cache.ping(),
+            }
 
 
 @app.get("/debug/cache")
@@ -302,6 +341,7 @@ async def build_map(shop_domain: str, request: Request):
     verify_internal_key(request)
     shopify = ShopifyClient(domain=shop_domain)
     result = await build_collab_map(shop_domain=shop_domain, shopify=shopify)
+    await _register_store(shop_domain)
     return {"success": True, **result}
 
 
