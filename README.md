@@ -158,48 +158,7 @@ Triggers a full rebuild of the collaborative filtering map for the given store. 
 
 ---
 
-## How Helm should call this (RecommenderGateway sketch)
 
-```python
-# apps/gateways/recommender.py
-import httpx
-from django.conf import settings
-
-class RecommenderGateway:
-    def __init__(self):
-        self.base_url = settings.RECOMMENDER_URL
-        self.headers = {
-            "Authorization": f"Bearer {settings.INTERNAL_API_KEY}",
-            "Content-Type": "application/json",
-        }
-
-    def get_recommendations(
-        self,
-        shop_domain: str,
-        purchased_ids: list,
-        top_tags: list,
-        top_types: list,
-        browse_history: list,
-        query: str = None,
-        limit: int = 4,
-    ) -> list:
-        with httpx.Client(timeout=10.0) as client:
-            res = client.post(
-                f"{self.base_url}/recommend",
-                headers=self.headers,
-                json={
-                    "shop_domain": shop_domain,
-                    "purchased_product_ids": purchased_ids,
-                    "top_product_types": top_types,
-                    "top_tags": top_tags,
-                    "browse_history": browse_history,
-                    "query": query,
-                    "limit": limit,
-                },
-            )
-            res.raise_for_status()
-            return res.json()["recommendations"]
-```
 
 Add to Helm's env vars and settings:
 ```
@@ -247,13 +206,13 @@ The service is designed to never error on missing data. Here's what happens when
 - The Worker as a thin proxy — serves the widget JS, forwards chat to Helm, receives browse events
 
 **What gets replaced when Helm integrates:**
-- Worker's Gemini AI backend → Helm's DMPipeline
-- Worker's KV session storage → Helm's `Conversation` + `Message` models
-- Worker's D1 knowledge base (FAQs/policies) → Helm's `BusinessConfig`
+- Worker's Gemini AI backend 
+- Worker's KV session storage
+- Worker's D1 knowledge base (FAQs/policies)
 - Worker's customer profile building → Helm fetches from Shopify directly using stored token
 
 **Widget integration point:**
-The widget's `botUrl` config (in `window.__HELM_CONFIG`) currently points at the Worker's `/chat` endpoint. When Helm takes over, that URL changes to Helm's new `/api/shopify/chat/` endpoint. The Worker becomes a thin proxy that forwards to Helm. The widget JS itself does not change.
+The widget's `botUrl` config  currently points at the Worker's `/chat` endpoint. When Helm takes over, that URL changes to Helm's new `/api/shopify/chat/` endpoint. The Worker becomes a thin proxy that forwards to Helm. The widget JS itself does not change.
 
 ---
 
