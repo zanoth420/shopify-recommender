@@ -1,11 +1,10 @@
 fastapi
 uvicorn
 httpx
-redis
+redis>=4.2
 numpy
 scikit-learn
 pandas
 python-dotenv
 pydantic
-dotenv
-redis>=4.2
+pytest

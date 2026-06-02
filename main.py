@@ -40,35 +40,12 @@ logger = logging.getLogger(__name__)
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
 WORKER_URL = os.getenv("WORKER_URL", "")
 
-# Persistent registry of shops to re-warm on startup. No TTL — must outlive
-# the collab map's 6h TTL and survive restarts (Redis only).
-REGISTERED_STORES_KEY = "registered_stores"
-
-
-async def _register_store(shop_domain: str):
-    domains = await cache.get(REGISTERED_STORES_KEY) or []
-    if shop_domain not in domains:
-        domains.append(shop_domain)
-        await cache.set(REGISTERED_STORES_KEY, domains, ttl_seconds=None)
-
-
-async def _warm_collab_maps():
-    domains = await cache.get(REGISTERED_STORES_KEY) or []
-    logger.info("Startup: warming collab maps for %d store(s).", len(domains))
-    for domain in domains:
-        try:
-            shopify = ShopifyClient(domain=domain)
-            await build_collab_map(shop_domain=domain, shopify=shopify)
-            logger.info("Startup: warmed collab map for %s.", domain)
-        except Exception:
-            logger.exception("Startup: collab warm failed for %s", domain)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Warm the collab cache for known stores before requests arrive, so
-    # /recommend never has to rebuild inline.
-    asyncio.create_task(_warm_collab_maps())
+    # This service is tokenless — it can't fetch Shopify on its own at startup,
+    # so there is no startup collab warm. The collab map is (re)built only when
+    # Helm calls POST /build-map with the store's X-Shopify-Token. A cold cache
+    # degrades gracefully to tag-only recommendations until the first build.
     yield
 
 
@@ -87,6 +64,19 @@ def verify_internal_key(request: Request):
     token = auth.replace("Bearer ", "").strip()
     if not INTERNAL_API_KEY or token != INTERNAL_API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def require_shopify_token(request: Request) -> str:
+    """The per-store Shopify access token Helm passes for this call.
+
+    This service is tokenless: it holds no Shopify credentials and uses this
+    token only for the duration of the request. Should be read-only scoped
+    (products + orders). Never logged.
+    """
+    token = request.headers.get("X-Shopify-Token", "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing X-Shopify-Token")
+    return token
 
 
 def verify_key_param(key: str):
@@ -214,12 +204,12 @@ document.getElementById('c').innerHTML=html||'<div style="text-align:center;padd
     return HTMLResponse(content=html)
 
 
-async def _get_recommendations(body: RecommendRequest):
+async def _get_recommendations(body: RecommendRequest, access_token: str):
     """
     Core recommendation logic. Returns (merged, collab_recs, tag_recs, browse_boost, query_type).
     Used by both /recommend and /recommend/debug.
     """
-    shopify = ShopifyClient(domain=body.shop_domain)
+    shopify = ShopifyClient(domain=body.shop_domain, access_token=access_token)
 
     query_type = detect_product_type(body.query) if body.query else None
 
@@ -275,7 +265,8 @@ def _log(body, merged, collab_recs, tag_recs, browse_boost, query_type, debug_in
 @app.post("/recommend")
 async def recommend(body: RecommendRequest, request: Request):
     verify_internal_key(request)
-    merged, collab_recs, tag_recs, browse_boost, query_type = await _get_recommendations(body)
+    access_token = require_shopify_token(request)
+    merged, collab_recs, tag_recs, browse_boost, query_type = await _get_recommendations(body, access_token)
 
     _log(body, merged, collab_recs, tag_recs, browse_boost, query_type)
 
@@ -285,7 +276,8 @@ async def recommend(body: RecommendRequest, request: Request):
 @app.post("/recommend/debug")
 async def recommend_debug(body: RecommendRequest, request: Request):
     verify_internal_key(request)
-    merged, collab_recs, tag_recs, browse_boost, query_type = await _get_recommendations(body)
+    access_token = require_shopify_token(request)
+    merged, collab_recs, tag_recs, browse_boost, query_type = await _get_recommendations(body, access_token)
 
     merge_order = "tags_first" if query_type else "collab_first"
 
@@ -339,9 +331,9 @@ async def recommend_debug(body: RecommendRequest, request: Request):
 @app.post("/build-map")
 async def build_map(shop_domain: str, request: Request):
     verify_internal_key(request)
-    shopify = ShopifyClient(domain=shop_domain)
+    access_token = require_shopify_token(request)
+    shopify = ShopifyClient(domain=shop_domain, access_token=access_token)
     result = await build_collab_map(shop_domain=shop_domain, shopify=shopify)
-    await _register_store(shop_domain)
     return {"success": True, **result}
 
 
