@@ -21,12 +21,9 @@ from models import (
     DebugRecommendResponse, DebugInfo, ScoringBreakdown,
 )
 from collab import get_collab_recommendations, build_collab_map
-from tags import get_tag_recommendations, detect_product_type
-from browse import score_browse_intent
 from shopify import ShopifyClient
 from db import log_recommendation, get_recent_logs
 from contextlib import asynccontextmanager
-import asyncio
 import json
 import logging
 import os
@@ -204,59 +201,34 @@ document.getElementById('c').innerHTML=html||'<div style="text-align:center;padd
     return HTMLResponse(content=html)
 
 
-async def _get_recommendations(body: RecommendRequest, access_token: str):
+async def _get_recommendations(body: RecommendRequest) -> list:
+    """Collab-only ranking. Returns ranked [{id, score, source}].
+
+    The recommender is a pure ranker now: it ranks from the cached collab map
+    (SVD → co-occurrence) and returns ids + scores. Tag matching, browse-intent,
+    and card building live in the host app (Helm), which resolves these ids
+    against its own product catalog. No Shopify access here.
     """
-    Core recommendation logic. Returns (merged, collab_recs, tag_recs, browse_boost, query_type).
-    Used by both /recommend and /recommend/debug.
-    """
-    shopify = ShopifyClient(domain=body.shop_domain, access_token=access_token)
-
-    query_type = detect_product_type(body.query) if body.query else None
-
-    collab_recs, tag_recs = await asyncio.gather(
-        get_collab_recommendations(
-            shop_domain=body.shop_domain,
-            purchased_ids=body.purchased_product_ids,
-            shopify=shopify,
-        ),
-        get_tag_recommendations(
-            top_product_types=body.top_product_types,
-            top_tags=body.top_tags,
-            purchased_ids=body.purchased_product_ids,
-            shopify=shopify,
-            shop_domain=body.shop_domain,
-            query=body.query,
-        ),
-    )
-
-    if query_type:
-        for rec in collab_recs:
-            if not _matches_type(rec, query_type):
-                rec["score"] = rec.get("score", 0) * 0.3
-
-    browse_boost = score_browse_intent(body.browse_history)
-    merged = merge_recommendations(
-        collab_recs, tag_recs, browse_boost,
-        query_type=query_type,
+    return await get_collab_recommendations(
+        shop_domain=body.shop_domain,
+        purchased_ids=body.purchased_product_ids,
         limit=body.limit or 4,
     )
 
-    return merged, collab_recs, tag_recs, browse_boost, query_type
 
-
-def _log(body, merged, collab_recs, tag_recs, browse_boost, query_type, debug_info=None):
+def _log(body, merged):
     try:
         log_recommendation(
             shop_domain=body.shop_domain,
             query=body.query,
-            query_type=query_type,
-            merge_order="tags_first" if query_type else "collab_first",
+            query_type=None,
+            merge_order="collab_only",
             purchased_ids=body.purchased_product_ids,
-            collab_recs=collab_recs,
-            tag_recs=tag_recs,
-            browse_boost=browse_boost,
+            collab_recs=merged,
+            tag_recs=[],
+            browse_boost={},
             merged=merged,
-            debug_info=debug_info,
+            debug_info=None,
         )
     except Exception:
         pass
@@ -265,66 +237,23 @@ def _log(body, merged, collab_recs, tag_recs, browse_boost, query_type, debug_in
 @app.post("/recommend")
 async def recommend(body: RecommendRequest, request: Request):
     verify_internal_key(request)
-    access_token = require_shopify_token(request)
-    merged, collab_recs, tag_recs, browse_boost, query_type = await _get_recommendations(body, access_token)
-
-    _log(body, merged, collab_recs, tag_recs, browse_boost, query_type)
-
+    merged = await _get_recommendations(body)
+    _log(body, merged)
     return RecommendResponse(recommendations=merged)
 
 
 @app.post("/recommend/debug")
 async def recommend_debug(body: RecommendRequest, request: Request):
     verify_internal_key(request)
-    access_token = require_shopify_token(request)
-    merged, collab_recs, tag_recs, browse_boost, query_type = await _get_recommendations(body, access_token)
-
-    merge_order = "tags_first" if query_type else "collab_first"
-
-    collab_breakdowns = [
-        ScoringBreakdown(
-            id=r["id"],
-            title=r["title"],
-            source=r.get("source", "collab"),
-            raw_score=r.get("score", 0),
-            browse_boost=browse_boost.get(r["title"], 0),
-            final_score=r.get("score", 0) + browse_boost.get(r["title"], 0) * 0.5,
-        )
-        for r in collab_recs
-    ]
-
-    tag_breakdowns = [
-        ScoringBreakdown(
-            id=r["id"],
-            title=r["title"],
-            source="tags",
-            raw_score=r.get("score", 0),
-            browse_boost=browse_boost.get(r["title"], 0),
-            final_score=r.get("score", 0) + browse_boost.get(r["title"], 0) * 0.5,
-        )
-        for r in tag_recs
-    ]
-
-    debug_dict = {
-        "query_type_detected": query_type,
-        "merge_order": merge_order,
-        "collab_candidates": [b.model_dump() for b in collab_breakdowns],
-        "tag_candidates": [b.model_dump() for b in tag_breakdowns],
-        "browse_boost_map": browse_boost,
-        "final_picks": [r["id"] for r in merged],
-    }
+    merged = await _get_recommendations(body)
 
     debug = DebugInfo(
-        query_type_detected=query_type,
-        merge_order=merge_order,
-        collab_candidates=collab_breakdowns,
-        tag_candidates=tag_breakdowns,
-        browse_boost_map=browse_boost,
+        source="collab",
+        collab_candidates=[ScoringBreakdown(id=r["id"], source=r.get("source", "collab"), score=r["score"]) for r in merged],
         final_picks=[r["id"] for r in merged],
     )
 
-    _log(body, merged, collab_recs, tag_recs, browse_boost, query_type, debug_info=debug_dict)
-
+    _log(body, merged)
     return DebugRecommendResponse(recommendations=merged, debug=debug)
 
 
@@ -335,39 +264,3 @@ async def build_map(shop_domain: str, request: Request):
     shopify = ShopifyClient(domain=shop_domain, access_token=access_token)
     result = await build_collab_map(shop_domain=shop_domain, shopify=shopify)
     return {"success": True, **result}
-
-
-def _matches_type(rec, query_type):
-    pt = (rec.get("product_type") or "").lower()
-    return query_type.lower() in pt
-
-
-def merge_recommendations(collab, tags, browse_boost, query_type=None, limit=4):
-    seen = set()
-    merged = []
-
-    if query_type:
-        all_recs = tags + collab
-    else:
-        all_recs = collab + tags
-
-    boosted = []
-    for rec in all_recs:
-        boost = browse_boost.get(rec["title"], 0)
-        boosted.append({
-            **rec,
-            "score": rec.get("score", 0) + (boost * 0.5),
-            "browse_boost": boost,
-        })
-
-    boosted.sort(key=lambda x: x["score"], reverse=True)
-
-    for rec in boosted:
-        rid = str(rec["id"])
-        if rid not in seen:
-            seen.add(rid)
-            merged.append(rec)
-        if len(merged) >= limit:
-            break
-
-    return merged

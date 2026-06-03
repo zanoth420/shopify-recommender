@@ -22,40 +22,39 @@ class RecommendRequest(BaseModel):
     query: Optional[str] = None
 
 
-class Product(BaseModel):
+class RankedProduct(BaseModel):
+    """A ranked product id + score from collaborative filtering.
+
+    The recommender is a pure ranker: it returns ids and scores only. The host
+    app (Helm) resolves these ids against its own product catalog to build the
+    customer-facing cards, so no display fields (title/url/image/price) and no
+    Shopify access are needed here.
+    """
+
     id: int
-    title: str
-    url: str
-    image: Optional[str] = None
-    price: Optional[str] = None
-    source: str
     score: float = 0
+    source: str = "collab"
 
 
 class RecommendResponse(BaseModel):
-    recommendations: list[Product]
+    recommendations: list[RankedProduct]
 
 
 # ─── Debug models ────────────────────────────────────────
+# Collab-only: tag/browse scoring + display fields now live in the host app (Helm).
 
 class ScoringBreakdown(BaseModel):
     id: int
-    title: str
-    source: str
-    raw_score: float = 0.0
-    browse_boost: float = 0.0
-    final_score: float = 0.0
+    source: str = "collab"
+    score: float = 0.0
 
 
 class DebugInfo(BaseModel):
-    query_type_detected: Optional[str] = None
-    merge_order: str
+    source: str = "collab"
     collab_candidates: list[ScoringBreakdown] = Field(default_factory=list)
-    tag_candidates: list[ScoringBreakdown] = Field(default_factory=list)
-    browse_boost_map: dict[str, float] = Field(default_factory=dict)
     final_picks: list[int] = Field(default_factory=list)
 
 
 class DebugRecommendResponse(BaseModel):
-    recommendations: list[Product]
+    recommendations: list[RankedProduct]
     debug: DebugInfo

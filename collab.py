@@ -80,9 +80,14 @@ async def build_collab_map(shop_domain: str, shopify):
 async def get_collab_recommendations(
     shop_domain: str,
     purchased_ids: list,
-    shopify,
-    limit: int = 4
+    limit: int = 4,
 ) -> list:
+    """Rank products purely from the cached collab map (SVD → co-occurrence).
+
+    Returns ranked ``[{"id": int, "score": float, "source": str}]`` — ids and
+    scores only. Helm resolves these ids against its own ProductCatalog to build
+    cards, so this never fetches Shopify (no token, no live product read).
+    """
     purchased = set(str(p) for p in purchased_ids)
 
     # Try SVD first
@@ -90,14 +95,12 @@ async def get_collab_recommendations(
     if svd_data:
         scored = _svd_recommend(svd_data, purchased, limit)
         if scored:
-            return await _fetch_product_details(
-                scored, purchased, shopify, shop_domain, "svd"
-            )
+            return _to_ranked(scored, "svd")
 
     # Fall back to co-occurrence
     product_map = await cache.get(f"collab:{shop_domain}")
     if not product_map:
-        # Cold cache: degrade to tag-only. Never rebuild inline — it blocks/times out.
+        # Cold cache: degrade to tag-only (Helm-side). Never rebuild inline — it blocks/times out.
         logger.warning("Collab cache cold for %s — returning no collab recs.", shop_domain)
         return []
 
@@ -111,9 +114,20 @@ async def get_collab_recommendations(
     top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:limit]
     scored = {pid: score for pid, score in top}
 
-    return await _fetch_product_details(
-        scored, purchased, shopify, shop_domain, "collab"
-    )
+    return _to_ranked(scored, "collab")
+
+
+def _to_ranked(scored: dict, source: str) -> list:
+    """Turn {product_id: score} into ranked [{id, score, source}], score-desc."""
+    ranked = sorted(scored.items(), key=lambda kv: kv[1], reverse=True)
+    out = []
+    for pid, score in ranked:
+        try:
+            product_id = int(pid)
+        except (TypeError, ValueError):
+            continue
+        out.append({"id": product_id, "score": float(score), "source": source})
+    return out
 
 
 def _svd_recommend(svd_data: dict, purchased: set, limit: int) -> dict | None:
@@ -139,36 +153,3 @@ def _svd_recommend(svd_data: dict, purchased: set, limit: int) -> dict | None:
         for i in top_indices
         if raw_scores[i] > -999
     }
-
-
-async def _fetch_product_details(
-    scored: dict,
-    purchased: set,
-    shopify,
-    shop_domain: str,
-    source: str
-) -> list:
-    """
-    scored: {product_id: score}
-    Fetches full product details and attaches the actual score.
-    """
-    if not scored:
-        return []
-
-    product_ids = list(scored.keys())
-    products = await shopify.get_products_by_ids(product_ids)
-
-    return [
-        {
-            "id": p["id"],
-            "title": p["title"],
-            "url": f"https://{shop_domain}/products/{p['handle']}",
-            "image": (p.get("images") or [{}])[0].get("src"),
-            "price": (p.get("variants") or [{}])[0].get("price"),
-            "product_type": p.get("product_type", ""),
-            "source": source,
-            "score": scored.get(str(p["id"]), 0.0),
-        }
-        for p in products
-        if str(p["id"]) not in purchased
-    ]
