@@ -3,12 +3,17 @@ main.py — FastAPI recommendation service
 
 Endpoints:
   POST /recommend        — returns ranked product recommendations
-  POST /recommend/debug  — same + full scoring breakdown
+  POST /recommend/debug  — same + scoring breakdown
   POST /build-map        — rebuilds the collab map
   GET  /health           — health check
   GET  /debug/cache      — inspect cached collab/SVD data
   GET  /logs             — view recent recommendation logs (JSON)
   GET  /logs/view        — visual dashboard for recommendation logs
+
+The recommender is a pure collaborative-filtering ranker: it ranks from the
+cached collab map (SVD → co-occurrence) and returns product ids + scores.
+Content matching (semantic search) and card building live in the host app
+(Helm), which resolves these ids against its own catalog.
 
 All endpoints except /health require INTERNAL_API_KEY auth.
 """
@@ -42,7 +47,8 @@ async def lifespan(app: FastAPI):
     # This service is tokenless — it can't fetch Shopify on its own at startup,
     # so there is no startup collab warm. The collab map is (re)built only when
     # Helm calls POST /build-map with the store's X-Shopify-Token. A cold cache
-    # degrades gracefully to tag-only recommendations until the first build.
+    # returns no collab recs until the first build; Helm falls back to its own
+    # semantic search in the meantime.
     yield
 
 
@@ -161,14 +167,7 @@ body{font-family:system-ui;background:#0f1117;color:#e2e4e9;padding:24px}
 .card:hover{border-color:#3a3f50}
 .card.open{border-color:#6c72ff}
 .summary{padding:12px 16px;cursor:pointer;display:flex;justify-content:space-between}
-.query{font-size:14px;font-weight:500}
-.query.none{color:#6b7080;font-style:italic}
-.pills{display:flex;gap:6px;margin-top:4px}
-.pill{font-size:10px;padding:2px 8px;border-radius:4px;font-weight:500}
-.pill-t{background:#1a2940;color:#5b9cf5}
-.pill-c{background:#251e40;color:#9b8cff}
-.pill-q{background:#2a2210;color:#d4a944}
-.pill-b{background:#0f2a22;color:#4cc99a}
+.shop{font-size:14px;font-weight:500}
 .time{font-size:12px;color:#6b7080;font-family:monospace}
 .counts{font-size:11px;color:#6b7080;margin-top:4px}
 .counts b{color:#e2e4e9}
@@ -183,7 +182,6 @@ td.n{text-align:right;font-family:monospace;font-size:12px}
 .rank{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .rk{font-size:12px;padding:3px 8px;background:#1e2130;border:1px solid #2a2d38;border-radius:4px}
 .rk b{color:#6c72ff;margin-right:4px}
-.boost{font-size:12px;padding:3px 8px;background:#0f2a22;color:#4cc99a;border-radius:4px;font-family:monospace;display:inline-block;margin:2px}
 h2{font-size:16px;font-weight:600;margin-bottom:16px}
 h2 span{color:#6c72ff}
 </style></head><body>
@@ -192,10 +190,10 @@ h2 span{color:#6c72ff}
 <script>
 var logs=__LOGS_DATA__;
 function P(v){if(!v)return null;if(typeof v==='object')return v;try{return JSON.parse(v)}catch{return null}}
-function F(v){if(typeof v!=='number')return'\u2014';return v===0?'0':Math.abs(v)>=1?v.toFixed(2):v.toFixed(4)}
+function F(v){if(typeof v!=='number')return'—';return v===0?'0':Math.abs(v)>=1?v.toFixed(2):v.toFixed(4)}
 function T(iso){if(!iso)return'';var d=new Date(iso),p=function(n){return String(n).padStart(2,'0')};return['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]+' '+d.getDate()+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}
-function R(cs,label){if(!cs||!cs.length)return'';var h='<div class="sec">'+label+' ('+cs.length+')</div><table><tr><th>Product</th><th>Source</th><th class="n">Raw</th><th class="n">Boost</th><th class="n">Final</th></tr>';cs.forEach(function(c){var r=c.raw_score!==undefined?c.raw_score:(c.score||0);var b=c.browse_boost||0;var f=c.final_score!==undefined?c.final_score:r;h+='<tr><td>'+c.title+'</td><td>'+(c.source||'?')+'</td><td class="n">'+F(r)+'</td><td class="n">'+(b>0?'+'+F(b):'\u2014')+'</td><td class="n" style="color:#e2e4e9;font-weight:500">'+F(f)+'</td></tr>'});return h+'</table>'}
-var html='';logs.forEach(function(l,i){var d=P(l.full_debug);var cc=d?(d.collab_candidates||[]):(P(l.collab_candidates)||[]);var tc=d?(d.tag_candidates||[]):(P(l.tag_candidates)||[]);var bm=d?(d.browse_boost_map||{}):(P(l.browse_boost_map)||{});var fp=d?(d.final_picks||[]):(P(l.final_picks)||[]);var be=Object.entries(bm);var all=[].concat(tc,cc);var pills='<span class="pill '+(l.merge_order==='tags_first'?'pill-t':'pill-c')+'">'+(l.merge_order||'?')+'</span>';if(l.query_type)pills+='<span class="pill pill-q">'+l.query_type+'</span>';if(be.length)pills+='<span class="pill pill-b">browse</span>';var bh='';if(be.length){bh='<div class="sec">Browse boosts</div>';be.forEach(function(e){bh+='<span class="boost">'+e[0]+': +'+F(e[1])+'</span> '})}var ph='';if(fp.length){ph='<div class="sec">Final ranking</div><div class="rank">';fp.forEach(function(id,j){var f=all.find(function(c){return c.id===id});ph+='<span class="rk"><b>#'+(j+1)+'</b>'+(f?f.title:id)+'</span>'});ph+='</div>'}html+='<div class="card" id="l'+i+'"><div class="summary" onclick="document.getElementById(\'l'+i+'\').classList.toggle(\'open\')"><div><div class="query '+(l.query?'':'none')+'">'+(l.query||'No query')+'</div><div class="pills">'+pills+'</div></div><div style="text-align:right"><div class="time">'+T(l.created_at)+'</div><div class="counts">collab <b>'+l.collab_count+'</b> · tags <b>'+l.tag_count+'</b> · final <b>'+l.final_count+'</b></div></div></div><div class="detail">'+R(cc,'Collab candidates')+R(tc,'Tag candidates')+bh+ph+'</div></div>'});
+function R(cs,label){if(!cs||!cs.length)return'';var h='<div class="sec">'+label+' ('+cs.length+')</div><table><tr><th>Product</th><th>Source</th><th class="n">Score</th></tr>';cs.forEach(function(c){h+='<tr><td>'+c.id+'</td><td>'+(c.source||'?')+'</td><td class="n">'+F(c.score||0)+'</td></tr>'});return h+'</table>'}
+var html='';logs.forEach(function(l,i){var cc=P(l.collab_candidates)||[];var fp=P(l.final_picks)||[];var ph='';if(fp.length){ph='<div class="sec">Final ranking</div><div class="rank">';fp.forEach(function(id,j){ph+='<span class="rk"><b>#'+(j+1)+'</b>'+id+'</span>'});ph+='</div>'}html+='<div class="card" id="l'+i+'"><div class="summary" onclick="document.getElementById(\'l'+i+'\').classList.toggle(\'open\')"><div><div class="shop">'+l.shop_domain+'</div><div class="counts">collab <b>'+l.collab_count+'</b> · final <b>'+l.final_count+'</b></div></div><div style="text-align:right"><div class="time">'+T(l.created_at)+'</div></div></div><div class="detail">'+R(cc,'Collab candidates')+ph+'</div></div>'});
 document.getElementById('c').innerHTML=html||'<div style="text-align:center;padding:60px;color:#6b7080">No logs</div>';
 </script></body></html>""".replace("__LOGS_DATA__", logs_json)
     return HTMLResponse(content=html)
@@ -205,9 +203,9 @@ async def _get_recommendations(body: RecommendRequest) -> list:
     """Collab-only ranking. Returns ranked [{id, score, source}].
 
     The recommender is a pure ranker now: it ranks from the cached collab map
-    (SVD → co-occurrence) and returns ids + scores. Tag matching, browse-intent,
-    and card building live in the host app (Helm), which resolves these ids
-    against its own product catalog. No Shopify access here.
+    (SVD → co-occurrence) and returns ids + scores. Content matching (semantic
+    search) and card building live in the host app (Helm), which resolves these
+    ids against its own product catalog. No Shopify access here.
     """
     return await get_collab_recommendations(
         shop_domain=body.shop_domain,
@@ -220,18 +218,12 @@ def _log(body, merged):
     try:
         log_recommendation(
             shop_domain=body.shop_domain,
-            query=body.query,
-            query_type=None,
-            merge_order="collab_only",
             purchased_ids=body.purchased_product_ids,
             collab_recs=merged,
-            tag_recs=[],
-            browse_boost={},
             merged=merged,
-            debug_info=None,
         )
     except Exception:
-        pass
+        logger.warning("failed to log recommendation for %s", body.shop_domain, exc_info=True)
 
 
 @app.post("/recommend")

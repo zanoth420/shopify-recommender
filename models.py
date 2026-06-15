@@ -1,25 +1,20 @@
 """
 models.py — Pydantic models for the recommendation service
+
+The recommender is a pure collaborative-filtering ranker: it takes a customer's
+purchase history and returns ranked product ids + scores. Content matching
+(semantic search) and card building live in the host app (Helm), so there are
+no tag/browse/query inputs and no display fields here.
 """
 
 from pydantic import BaseModel, Field
 from typing import Optional
 
 
-class BrowseEvent(BaseModel):
-    event: str
-    data: dict
-    timestamp: str
-
-
 class RecommendRequest(BaseModel):
     shop_domain: str
     purchased_product_ids: list[int] = Field(default_factory=list)
-    top_product_types: list[str] = Field(default_factory=list)
-    top_tags: list[str] = Field(default_factory=list)
-    browse_history: list[BrowseEvent] = Field(default_factory=list)
     limit: Optional[int] = 4
-    query: Optional[str] = None
 
 
 class RankedProduct(BaseModel):
@@ -41,7 +36,8 @@ class RecommendResponse(BaseModel):
 
 
 # ─── Debug models ────────────────────────────────────────
-# Collab-only: tag/browse scoring + display fields now live in the host app (Helm).
+# Collab-only: the recommender ranks from its cached SVD/co-occurrence map and
+# returns ids + scores. /recommend/debug echoes that ranking back for inspection.
 
 class ScoringBreakdown(BaseModel):
     id: int

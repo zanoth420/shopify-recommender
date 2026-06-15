@@ -100,7 +100,8 @@ async def get_collab_recommendations(
     # Fall back to co-occurrence
     product_map = await cache.get(f"collab:{shop_domain}")
     if not product_map:
-        # Cold cache: degrade to tag-only (Helm-side). Never rebuild inline — it blocks/times out.
+        # Cold cache: return nothing and let Helm fall back to its own semantic
+        # search. Never rebuild inline — it blocks/times out.
         logger.warning("Collab cache cold for %s — returning no collab recs.", shop_domain)
         return []
 
