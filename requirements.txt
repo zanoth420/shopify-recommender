@@ -4,7 +4,6 @@ httpx
 redis>=4.2
 numpy
 scikit-learn
-pandas
 python-dotenv
 pydantic
 pytest

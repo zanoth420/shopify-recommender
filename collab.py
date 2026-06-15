@@ -15,7 +15,7 @@ import cache
 
 logger = logging.getLogger(__name__)
 
-COLLAB_TTL = 6 * 3600  # 6 hours
+COLLAB_TTL = 43200  # 12 hours
 
 
 async def build_collab_map(shop_domain: str, shopify):
@@ -100,7 +100,8 @@ async def get_collab_recommendations(
     # Fall back to co-occurrence
     product_map = await cache.get(f"collab:{shop_domain}")
     if not product_map:
-        # Cold cache: degrade to tag-only (Helm-side). Never rebuild inline — it blocks/times out.
+        # Cold cache: return nothing and let Helm fall back to its own semantic
+        # search. Never rebuild inline — it blocks/times out.
         logger.warning("Collab cache cold for %s — returning no collab recs.", shop_domain)
         return []
 
