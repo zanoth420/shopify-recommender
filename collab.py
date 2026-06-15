@@ -15,7 +15,7 @@ import cache
 
 logger = logging.getLogger(__name__)
 
-COLLAB_TTL = 6 * 3600  # 6 hours
+COLLAB_TTL = 43200  # 12 hours
 
 
 async def build_collab_map(shop_domain: str, shopify):
